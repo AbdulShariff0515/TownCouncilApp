@@ -1,51 +1,66 @@
 # -*- coding: utf-8 -*-
 """
-Resident Feedback Portal (Town Council) — Single-entry form (Standalone)
-
-Resident flow:
-  1) Resident sees ONLY one form: "Share your feedback".
-  2) On Submit: background classification runs; page shows:
-       - Acknowledgement + Reference ID
-       - What happens next (what the Town Council will do)
-       - What you can do now (optional) — OpenAI-backed tips if configured; else safe local tips
-  3) No second textbox; no "Classify" UI anywhere.
-
-This file is self-contained (does NOT import classifier.py) to avoid UI conflicts.
-
-Setup (once):
-  pip install streamlit python-dotenv openai
-Optional .env (same folder):
-  OPENAI_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxx
-  OPENAI_MODEL=gpt-4o-mini
+Resident Feedback Portal (Town Council) — Single-entry form
+Works with admin.py via shared SQLite (data/app.db) provided by db.py
 
 Run:
   python -m streamlit run user_interface_ai.py
+
+Deps:
+  pip install streamlit python-dotenv openai pandas
 """
+
+from __future__ import annotations
 
 import os
 import re
 import json
 import uuid
 from datetime import datetime
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Tuple
 
 import streamlit as st
 from dotenv import load_dotenv
 
-# ---------------------------
-# Page setup (must be early)
-# ---------------------------
+# --- Shared DB layer (db.py must be in the SAME folder) ---
+from db import init_db, insert_submission, insert_attachment
+
+
+# ------------------------------------------------------------------------------
+# Basic setup
+# ------------------------------------------------------------------------------
 load_dotenv()
 st.set_page_config(page_title="Resident Feedback Portal", page_icon="💬", layout="centered")
 
-st.title("💬 Resident Feedback Portal")
+APP_VERSION = "Resident UI v0.4 — DB+uploads — 2026‑03‑22"
+st.sidebar.caption(APP_VERSION)
 
-# Toggle to show detected category/confidence to residents (set False to hide)
+# Initialize DB tables (idempotent)
+init_db()
+
+st.title("💬 Resident Feedback Portal")
+st.caption("Submit issues about your estate (maintenance, cleanliness, pests, parking, noise, infrastructure).")
+
+# Show detected category to resident?
 SHOW_CATEGORY_TO_RESIDENT = False
 
-# ---------------------------
-# Simple built-in classifier (rules)
-# ---------------------------
+
+# ------------------------------------------------------------------------------
+# Helpers for secrets (works locally & on Streamlit Cloud)
+# ------------------------------------------------------------------------------
+def get_secret(key: str, default: Optional[str] = None) -> Optional[str]:
+    # Cloud: st.secrets ; Local: os.environ/.env
+    try:
+        if key in st.secrets:
+            return st.secrets.get(key, default)
+    except Exception:
+        pass
+    return os.getenv(key, default)
+
+
+# ------------------------------------------------------------------------------
+# Rules & mappings
+# ------------------------------------------------------------------------------
 CATEGORY_PATTERNS: Dict[str, List[str]] = {
     "maintenance": [
         r"\blift (?:not working|break(?:ing)? ?down|stuck|fault(?:y)?|out of service)\b",
@@ -97,65 +112,81 @@ AGENCY_MAP: Dict[str, Dict[str, str]] = {
     "infrastructure": {"agency": "Town Council / LTA / PUB", "notes": "Estate fixtures → Town Council; roads/drains → LTA/PUB."},
 }
 
-def simple_classify(text: str) -> Dict:
-    """
-    Returns:
-      {
-        "final_category": str|None,
-        "final_confidence": float,
-        "confidence_label": "High|Medium|Low",
-        "source": "rules"|"manual",
-        "agency": {...}|None
-      }
-    """
+COMMON_ISSUE_TEMPLATES = {
+    "Lift not working": "Lift at Block ___ is not working / stuck between floors.",
+    "Water leakage": "Water seeping from ceiling near the corridor / kitchen.",
+    "Overflowing bins": "Bins at Block ___ level ___ are overflowing with rubbish.",
+    "Rodents seen": "Sighted rats near the bin centre / void deck at night.",
+    "Illegal parking": "Vehicle parking illegally and blocking the driveway at ___.",
+    "Loud music": "Loud music late at night near ___ affecting residents.",
+    "Drain blocked": "Drain along ___ is clogged; water ponding after rain.",
+}
+
+
+# ------------------------------------------------------------------------------
+# Classification (rules + optional OpenAI) — fully guarded
+# ------------------------------------------------------------------------------
+def rules_classify(text: str) -> Dict:
     t = (text or "").lower().strip()
     if not t:
-        return {
-            "final_category": None,
-            "final_confidence": 0.0,
-            "confidence_label": "Low",
-            "source": "manual",
-            "agency": None,
-        }
+        return {"category": None, "confidence": 0.0, "source": "manual"}
     scores = {cat: sum(1 for p in pats if re.search(p, t)) for cat, pats in CATEGORY_PATTERNS.items()}
     best = max(scores, key=lambda c: scores[c]) if any(scores.values()) else None
     conf = 0.6 + 0.12 * (scores.get(best, 0)) if best else 0.0
     conf = min(0.95, conf)
-    label = "High" if conf >= 0.8 else ("Medium" if conf >= 0.5 else "Low")
-    agency = AGENCY_MAP.get(best) if best else None
-    return {
-        "final_category": best,
-        "final_confidence": round(conf, 2),
-        "confidence_label": label,
-        "source": "rules" if best else "manual",
-        "agency": agency,
-    }
+    return {"category": best, "confidence": round(conf, 2), "source": "rules" if best else "manual"}
 
-# ---------------------------
-# Helpers: reference, saving, steps & advice
-# ---------------------------
-def generate_ref() -> str:
-    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-    return f"TC-{ts}-{str(uuid.uuid4())[:8].upper()}"
 
-def save_submission(payload: dict, save: bool = True) -> None:
-    """Append to data/submissions.jsonl locally. Create folder if needed."""
-    if not save:
-        return
+def ai_classify(text: str) -> Optional[Dict]:
+    """Optional OpenAI classifier. Safe to leave as-is; returns None if key/module missing or any error occurs."""
+    api_key = get_secret("OPENAI_API_KEY")
+    if not api_key or not text.strip():
+        return None
     try:
-        os.makedirs("data", exist_ok=True)
-        path = os.path.join("data", "submissions.jsonl")
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        # Import inside try so missing package never crashes the app
+        from openai import OpenAI  # type: ignore
+        client = OpenAI(api_key=api_key)
+        model = get_secret("OPENAI_MODEL", "gpt-4o-mini")
+        system_msg = (
+            "You are a classification assistant for Singapore Town Council estate issues. "
+            "Choose exactly one category from: maintenance, cleanliness, pests, parking, noise, infrastructure. "
+            "Return JSON: {\"category\": <one_of_list>, \"confidence\": 0.0-1.0}. "
+            "Use 'infrastructure' for roads/footpaths/drains/streetlights."
+        )
+        resp = client.chat.completions.create(
+            model=model,
+            temperature=0.0,
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": system_msg},
+                {"role": "user", "content": text.strip()},
+            ],
+        )
+        try:
+            data = json.loads(resp.choices[0].message.content or "{}")
+            cat = str(data.get("category", "")).strip().lower()
+            conf = float(data.get("confidence", 0.0))
+            if cat in CATEGORY_PATTERNS:
+                return {"category": cat, "confidence": round(min(max(conf, 0.0), 1.0), 2), "source": "openai"}
+        except Exception:
+            return None
     except Exception:
-        # Do not break resident flow if persistence fails
-        pass
+        return None
+    return None
 
+
+def choose_final_classification(text: str) -> Tuple[Optional[str], float, str]:
+    r = rules_classify(text)
+    a = ai_classify(text)
+    if a and (a["confidence"] >= r["confidence"] or r["confidence"] < 0.6):
+        return a["category"], a["confidence"], a["source"]
+    return r["category"], r["confidence"], r["source"]
+
+
+# ------------------------------------------------------------------------------
+# Next steps & advice (OpenAI advice optional, fully guarded)
+# ------------------------------------------------------------------------------
 def council_next_steps(category: Optional[str]) -> List[str]:
-    """
-    What the Town Council will do next (We will …).
-    Always includes: An officer will be in touch with you regarding your feedback.
-    """
     contact_line = "An officer will be in touch with you regarding your feedback."
     cat = (category or "").lower()
 
@@ -206,67 +237,67 @@ def council_next_steps(category: Optional[str]) -> List[str]:
     steps.append(contact_line)
     return steps
 
+
 def local_interim_advice(category: Optional[str]) -> List[str]:
-    """Resident actions (fallback if OpenAI is not configured)."""
     cat = (category or "").lower()
     if cat == "maintenance":
         return [
             "If water is near electrical points and it is safe to do so, switch off power to the affected area.",
-            "Use a container or towels to contain minor leakage and protect valuables.",
+            "Use towels/containers to contain minor leakage; protect valuables.",
             "Take clear photos/videos of the issue and note when it occurs.",
-            "Avoid using the affected fixture (e.g., tap/shower) until assessed.",
+            "Avoid using the affected fixture until assessed.",
         ]
     if cat == "pests":
         return [
             "Keep food covered and dispose garbage in sealed bags.",
-            "Wipe spills and crumbs promptly; avoid leaving pet food out.",
-            "If safe, take photos of sightings and possible entry points.",
-            "Avoid strong chemicals that may disperse pests—targeted treatment is preferable.",
+            "Wipe spills promptly; avoid leaving pet food out.",
+            "If safe, take photos of sightings and entry points.",
+            "Avoid strong chemicals that may disperse pests; targeted treatment is preferable.",
         ]
     if cat == "cleanliness":
         return [
-            "Avoid the dirty or wet area to prevent slips.",
-            "If manageable, secure loose trash to reduce odours.",
-            "Share photos to help us identify exact spots.",
+            "Avoid the dirty/wet area to prevent slips.",
+            "Secure loose trash if manageable.",
+            "Share photos to help locate exact spots.",
         ]
     if cat == "parking":
         return [
             "Do not engage directly if confrontation risk is present.",
-            "If safe, note the vehicle number, location, and time.",
-            "Keep access ways clear for emergency vehicles.",
+            "If safe, note vehicle number, location, and time.",
+            "Keep access ways clear.",
         ]
     if cat == "noise":
         return [
-            "If comfortable and safe, politely inform neighbours of the disturbance.",
-            "Use earplugs or white noise as a temporary measure.",
-            "Record times of disturbance to aid follow‑up.",
+            "If comfortable and safe, politely inform neighbours.",
+            "Use earplugs/white noise temporarily.",
+            "Record times of disturbance.",
         ]
     if cat == "infrastructure":
         return [
-            "Avoid the affected area if there is a trip or fall hazard.",
-            "Keep a safe distance from sharp edges or exposed parts.",
+            "Avoid the affected area if there is a hazard.",
+            "Keep a safe distance from exposed parts.",
             "Share clear photos and the exact location.",
         ]
     return [
         "Share clear photos/videos and precise location details.",
-        "Keep a safe distance if there is any immediate danger.",
+        "Keep a safe distance if there is any danger.",
         "We will update you after initial assessment.",
     ]
 
+
 def ai_interim_advice(issue_text: str, category: Optional[str]) -> Optional[List[str]]:
-    """Use OpenAI (if configured) to produce resident-safe interim advice."""
-    api_key = os.getenv("OPENAI_API_KEY")
+    api_key = get_secret("OPENAI_API_KEY")
     if not api_key:
         return None
     try:
-        from openai import OpenAI
+        from openai import OpenAI  # type: ignore
         client = OpenAI(api_key=api_key)
-        model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+        model = get_secret("OPENAI_MODEL", "gpt-4o-mini")
         system_msg = (
             "You are a safety-conscious assistant for residents reporting estate issues in Singapore (HDB/Town Council). "
-            "Given the resident's message and detected category, provide practical interim steps the resident can take now. "
+            "Given the resident's message and detected category, provide practical interim steps. "
             "Keep advice specific, actionable, and safe; avoid professional diagnoses. "
-            "Use at most 5 concise bullet points. If there is immediate danger, include a first bullet on safety. "
+            "Use at most 5 concise bullet points. If immediate danger exists, include a safety note first. "
             "Return JSON with key 'tips' as a list of strings."
         )
         payload = {"message": issue_text, "category": category or "unknown"}
@@ -279,86 +310,137 @@ def ai_interim_advice(issue_text: str, category: Optional[str]) -> Optional[List
                 {"role": "user", "content": json.dumps(payload)},
             ],
         )
-        data = resp.choices[0].message.content
-        obj = json.loads(data)
-        tips = obj.get("tips")
-        if isinstance(tips, list) and tips:
-            return [str(t).strip() for t in tips if str(t).strip()]
-        return None
+        try:
+            obj = json.loads(resp.choices[0].message.content or "{}")
+            tips = obj.get("tips")
+            if isinstance(tips, list) and tips:
+                return [str(t).strip() for t in tips if str(t).strip()]
+        except Exception:
+            return None
     except Exception:
         return None
+    return None
 
-# ---------------------------
-# UI — Single entry form
-# ---------------------------
-with st.form("resident_form", clear_on_submit=False):
-    st.subheader("Share your feedback")
-    col1, col2 = st.columns(2)
-    name = col1.text_input("Your name (optional)")
-    contact = col2.text_input("Contact (email or phone, optional)")
-    location = st.text_input("Location (e.g., Block, Street, Unit — optional)")
-    description = st.text_area(
-        "Describe the issue",
-        height=140,
-        placeholder="E.g., Water seeping from my ceiling near the corridor.",
-    )
-    urgency = st.selectbox("How urgent is this?", ["Normal", "Urgent", "Emergency"], index=0)
-    consent = st.checkbox("I consent to being contacted about this feedback.")
-    submit = st.form_submit_button("Submit", type="primary")
 
-# ---------------------------
-# After submit: acknowledgement + next steps
-# ---------------------------
+# ------------------------------------------------------------------------------
+# Sidebar status (so you can confirm environment)
+# ------------------------------------------------------------------------------
+if get_secret("OPENAI_API_KEY"):
+    st.sidebar.success(f"OpenAI: ENABLED  •  Model: {get_secret('OPENAI_MODEL', 'gpt-4o-mini')}")
+else:
+    st.sidebar.warning("OpenAI: disabled (rules-only fallback)")
+
+
+# ------------------------------------------------------------------------------
+# UI — Single-entry resident form
+# ------------------------------------------------------------------------------
+st.subheader("Share your feedback")
+
+# Location inputs
+col_loc1, col_loc2 = st.columns(2)
+blocks = ["(Select)", "Block 101", "Block 102", "Block 201", "Block 202", "Other"]
+streets = ["(Select)", "Pasir Ris Dr 1", "Pasir Ris Dr 3", "Elias Rd", "Loyang Ave", "Other"]
+
+selected_block = col_loc1.selectbox("Block (optional)", options=blocks, index=0)
+selected_street = col_loc2.selectbox("Street (optional)", options=streets, index=0)
+location_text = st.text_input("Location details (optional)", placeholder="E.g., Stairwell between levels 8–9, near lift lobby A")
+
+colA, colB = st.columns(2)
+name = colA.text_input("Your name (optional)")
+contact = colB.text_input("Contact (email or phone, optional)")
+
+# Quick templates
+with st.expander("Quick fill suggestions (optional)"):
+    tmpl = st.selectbox("Pick a common issue to prefill:", ["(None)"] + list(COMMON_ISSUE_TEMPLATES.keys()), index=0)
+    if st.button("Insert template", use_container_width=True, disabled=(tmpl == "(None)")):
+        st.session_state["desc_prefill"] = COMMON_ISSUE_TEMPLATES.get(tmpl, "")
+
+description = st.text_area(
+    "Describe the issue",
+    height=140,
+    value=st.session_state.get("desc_prefill", ""),
+    placeholder="E.g., Water seeping from my ceiling near the corridor.",
+)
+urgency = st.selectbox("How urgent is this?", ["Normal", "Urgent", "Emergency"], index=0)
+consent = st.checkbox("I consent to being contacted about this feedback.")
+
+# Photo uploads
+uploads = st.file_uploader(
+    "Add photos (optional)",
+    type=["png", "jpg", "jpeg", "heic", "webp"],
+    accept_multiple_files=True,
+)
+
+submit = st.button("Submit", type="primary", use_container_width=True)
+
+
+# ------------------------------------------------------------------------------
+# After submit
+# ------------------------------------------------------------------------------
 if submit:
-    if not description.strip():
+    if not (description or "").strip():
         st.warning("Please describe the issue so we can assist.")
         st.stop()
 
-    # Background classification (rules only, no visible UI)
-    result = simple_classify(description)
-    category = result.get("final_category")
-    confidence = result.get("final_confidence", 0.0)
-    agency_info = AGENCY_MAP.get(category) if category else None
+    # Hybrid classification with safe fallback
+    final_category, final_conf, source = choose_final_classification(description)
+    agency_info = AGENCY_MAP.get(final_category) if final_category else None
 
-    # Create reference & store
-    ref_id = generate_ref()
+    # Create reference & record
+    ref_id = f"TC-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{str(uuid.uuid4())[:8].upper()}"
     record = {
         "ref_id": ref_id,
         "name": (name or "").strip() or None,
         "contact": (contact or "").strip() or None,
-        "consent": bool(consent),
-        "location": (location or "").strip() or None,
+        "consent": 1 if consent else 0,
+        "location_text": (location_text or "").strip() or None,
+        "location_block": None if selected_block in ("(Select)", "Other") else selected_block,
+        "location_street": None if selected_street in ("(Select)", "Other") else selected_street,
         "urgency": urgency,
         "description": (description or "").strip(),
-        "category": category,
-        "confidence": confidence,
-        "source": result.get("source"),
-        "timestamp": datetime.now().isoformat(timespec="seconds"),
+        "category": final_category,
+        "confidence": float(final_conf or 0.0),
+        "source": source,  # "rules" | "openai" | "manual"
+        "status": "New",
+        "created_at": datetime.now().isoformat(timespec="seconds"),
     }
-    save_submission(record, save=True)
+    insert_submission(record)
+
+    # Save uploads & register in DB
+    os.makedirs(os.path.join("data", "uploads"), exist_ok=True)
+    for up in uploads or []:
+        safe_fn = f"{ref_id}_{re.sub(r'[^A-Za-z0-9_.-]+', '-', up.name)}"
+        stored_path = os.path.join("data", "uploads", safe_fn)
+        with open(stored_path, "wb") as f:
+            f.write(up.getbuffer())
+        insert_attachment(
+            ref_id=ref_id,
+            filename=up.name,
+            stored_path=stored_path,
+            mime_type=getattr(up, "type", None),
+            created_at=datetime.now().isoformat(timespec="seconds"),
+        )
 
     # Outputs
-    council_steps = council_next_steps(category)
-    tips = ai_interim_advice(description, category) or local_interim_advice(category)
+    steps = council_next_steps(final_category)
+    tips = ai_interim_advice(description, final_category) or local_interim_advice(final_category)
 
-    # Acknowledgement & summary
     st.success("Thank you — your feedback has been received.")
     st.markdown(f"**Reference ID:** `{ref_id}`")
     st.write("An officer will be in touch with you regarding your feedback.")
 
-    if SHOW_CATEGORY_TO_RESIDENT and category:
-        color = "green" if confidence >= 0.8 else ("orange" if confidence >= 0.5 else "gray")
-        st.markdown(f"**Detected category:** :{color}[{category}]  (confidence: {confidence})")
+    if SHOW_CATEGORY_TO_RESIDENT and final_category:
+        color = "green" if final_conf >= 0.8 else ("orange" if final_conf >= 0.5 else "gray")
+        st.markdown(f"**Detected category:** :{color}[{final_category}] (confidence: {final_conf})")
 
     if agency_info:
         st.markdown(f"**Suggested agency:** {agency_info['agency']}")
-        notes = agency_info.get("notes", "")
-        if notes:
-            st.caption(notes)
+        if agency_info.get("notes"):
+            st.caption(agency_info["notes"])
 
     st.divider()
     st.subheader("What happens next (what the Town Council will do)")
-    for s in council_steps:
+    for s in steps:
         st.markdown(f"- {s}")
 
     st.subheader("What you can do now (optional)")
