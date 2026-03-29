@@ -8,7 +8,6 @@ from typing import Optional, Dict, List
 import streamlit as st
 from dotenv import load_dotenv
 
-from workflow import generate_officer_workflow
 import streamlit.components.v1 as components
 
 
