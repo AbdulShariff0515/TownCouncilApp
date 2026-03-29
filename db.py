@@ -1,228 +1,261 @@
-# admin_app.py
+# db.py
+# ------------------------------------------------------------
+# SQLite database layer for Town Council Feedback System
+# ------------------------------------------------------------
+# Responsibilities:
+# - Initialise database & tables
+# - Insert & retrieve resident submissions
+# - Store attachments
+# - Update case status
+# - Support officer workflow governance logging
+# ------------------------------------------------------------
+
 import os
-import re
-import json
-import uuid
-from datetime import datetime
-from typing import Optional, Dict, List
-import streamlit as st
-from dotenv import load_dotenv
+import sqlite3
+from typing import List, Dict, Optional
 
-import streamlit.components.v1 as components
+DB_PATH = os.path.join("data", "app.db")
 
 
-def clean_mermaid(diagram: str) -> str:
-    """
-    Cleans AI-generated Mermaid diagrams to prevent syntax errors.
-    Removes punctuation that Mermaid cannot parse in node labels.
-    """
-    diagram = re.sub(
-        r"\[(.*?)\]",
-        lambda m: f"[{re.sub(r'[,:.]', '', m.group(1))}]",
-        diagram
+# ------------------------------------------------------------
+# Connection helper
+# ------------------------------------------------------------
+def _get_conn():
+    os.makedirs("data", exist_ok=True)
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+# ------------------------------------------------------------
+# Database initialisation
+# ------------------------------------------------------------
+def init_db():
+    conn = _get_conn()
+    cur = conn.cursor()
+
+    # --------------------------------------------------------
+    # Resident submissions
+    # --------------------------------------------------------
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS submissions (
+            ref_id TEXT PRIMARY KEY,
+            name TEXT,
+            contact TEXT,
+            consent INTEGER,
+            location_block TEXT,
+            location_street TEXT,
+            location_text TEXT,
+            urgency TEXT,
+            description TEXT NOT NULL,
+            category TEXT,
+            confidence REAL,
+            source TEXT,
+            status TEXT,
+            created_at TEXT
+        )
+    """)
+
+    # --------------------------------------------------------
+    # Attachments
+    # --------------------------------------------------------
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS attachments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ref_id TEXT NOT NULL,
+            filename TEXT NOT NULL,
+            stored_path TEXT NOT NULL,
+            mime_type TEXT,
+            created_at TEXT,
+            FOREIGN KEY (ref_id) REFERENCES submissions(ref_id)
+        )
+    """)
+
+    # --------------------------------------------------------
+    # Officer workflow decisions (Governance & Audit)
+    # --------------------------------------------------------
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS workflow_decisions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ref_id TEXT NOT NULL,
+            ai_used INTEGER,
+            priority_level TEXT,
+            recommended_status TEXT,
+            actions_json TEXT,
+            officer_decision TEXT,
+            officer_notes TEXT,
+            created_at TEXT,
+            FOREIGN KEY (ref_id) REFERENCES submissions(ref_id)
+        )
+    """)
+
+    conn.commit()
+    conn.close()
+
+
+# ------------------------------------------------------------
+# Insert submission
+# ------------------------------------------------------------
+def insert_submission(record: Dict):
+    conn = _get_conn()
+    cur = conn.cursor()
+
+    columns = ", ".join(record.keys())
+    placeholders = ", ".join("?" for _ in record)
+
+    cur.execute(
+        f"INSERT INTO submissions ({columns}) VALUES ({placeholders})",
+        tuple(record.values())
     )
-    return diagram
 
-def render_mermaid(code: str):
-    components.html(
-        f"""
-        <div class="mermaid">
-        {code}
-        </div>
-
-        <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
-        <script>
-            mermaid.initialize({{ startOnLoad: true, theme: "default" }});
-        </script>
-        """,
-        height=800,
-    )
-
-# ------------------------------------------------------------
-# Setup
-# ------------------------------------------------------------
-load_dotenv()
-st.set_page_config(page_title="Town Council – Staff Dashboard", page_icon="🗂️", layout="wide")
-init_db()
-
-st.title("🗂️ Staff Dashboard — Residents’ Feedback")
-
+    conn.commit()
+    conn.close()
 
 
 # ------------------------------------------------------------
-# Simple password protection
+# Insert attachment
 # ------------------------------------------------------------
-if "auth" not in st.session_state:
-    st.session_state.auth = False
+def insert_attachment(
+    ref_id: str,
+    filename: str,
+    stored_path: str,
+    mime_type: Optional[str],
+    created_at: str,
+):
+    conn = _get_conn()
+    cur = conn.cursor()
 
-if not st.session_state.auth:
-    pwd = st.text_input("Enter admin password", type="password")
-    if pwd and pwd == os.getenv("ADMIN_PASSWORD", "admin"):
-        st.session_state.auth = True
-        st.rerun()
-    st.stop()
+    cur.execute("""
+        INSERT INTO attachments
+        (ref_id, filename, stored_path, mime_type, created_at)
+        VALUES (?, ?, ?, ?, ?)
+    """, (ref_id, filename, stored_path, mime_type, created_at))
 
-
-# ------------------------------------------------------------
-# Filters
-# ------------------------------------------------------------
-colf1, colf2, colf3, colf4 = st.columns(4)
-category = colf1.selectbox("Category", ["(All)", "maintenance", "cleanliness", "pests", "parking", "noise", "infrastructure"], index=0)
-status = colf2.selectbox("Status", ["(All)", "New", "In Progress", "Resolved", "Closed"], index=0)
-query = colf3.text_input("Search (ref, desc, location)")
-refresh = colf4.button("Refresh")
-
-filters = {
-    "category": None if category == "(All)" else category,
-    "status": None if status == "(All)" else status,
-    "q": query.strip() or None,
-}
-
-rows = list_submissions(filters)
-
-st.caption(f"Showing {len(rows)} cases")
-st.dataframe(rows, use_container_width=True)
+    conn.commit()
+    conn.close()
 
 
 # ------------------------------------------------------------
-# Case details
+# List submissions (with filters)
 # ------------------------------------------------------------
-st.divider()
-ref_id = st.text_input("Open case by Reference ID")
-if ref_id:
-    match = [r for r in rows if r["ref_id"] == ref_id]
-    if not match:
-        st.warning("Reference not in current list. Clear filters or refresh.")
-    else:
-        case = match[0]
-        st.subheader(f"Case: {ref_id}")
-        col1, col2, col3 = st.columns(3)
-        col1.write(f"**Category:** {case['category'] or '-'} (conf: {case['confidence']})")
-        col2.write(f"**Urgency:** {case['urgency']}")
-        col3.write(f"**Status:** {case['status']}")
+def list_submissions(filters: Dict) -> List[Dict]:
+    conn = _get_conn()
+    cur = conn.cursor()
 
-        st.write(f"**Description:**\n\n{case['description']}")
-        st.write(f"**Location:** {case['location_block'] or ''} {case['location_street'] or ''} | {case['location_text'] or '-'}")
-        st.write(f"**Resident:** {case['name'] or '-'} | {case['contact'] or '-'} | Consent: {'Yes' if case['consent'] else 'No'}")
-        st.caption(f"Created at: {case['created_at']} | Source: {case['source']}")
+    sql = "SELECT * FROM submissions WHERE 1=1"
+    params = []
 
-        # ------------------------------------------------------------
-        # Attachments
-        # ------------------------------------------------------------
+    if filters.get("category"):
+        sql += " AND category = ?"
+        params.append(filters["category"])
 
-        atts = get_attachments(ref_id)
-        if atts:
-            st.write("**Attachments:**")
-            for a in atts:
-                st.write(f"- {a['filename']}  \n{a['stored_path']}")
-        else:
-            st.caption("No attachments.")
-	# --------------------------------------------------
-        # Officer workflow guidance (AI / rules)
-        # --------------------------------------------------
-        
-        st.divider()
-        st.subheader("Officer Workflow Guidance")
+    if filters.get("status"):
+        sql += " AND status = ?"
+        params.append(filters["status"])
 
-        workflow = None
-
-        if st.button("Generate workflow guidance"):
-            workflow = generate_officer_workflow(ref_id)
-
-            if workflow.get("error"):
-                st.error(workflow["error"])
-            else:
-                st.markdown(f"**Priority level:** {workflow['priority_level']}")
-                st.markdown(f"**Recommended status:** {workflow['recommended_status']}")
-
-                st.markdown("### Suggested actions")
-                for step in workflow.get("actions", []):
-                    st.markdown(f"- {step}")
-
-                if workflow.get("escalate"):
-                    st.warning("⚠️ Escalation recommended")
-
-                if workflow.get("notes"):
-                    st.caption(workflow["notes"])
-		
-                
-                # Mermaid diagram
-                mermaid_diagram = """
-                flowchart TD
-                    A[Case Received] --> B[Review Case Details]
-                    B --> C[Assess Safety Risks]
-                    C --> D{Urgent Action Required?}
-                    D -- Yes --> E[Escalate]
-                    D -- No --> F[Assign Contractor]
-                    F --> G[Site Visit]
-                    G --> H[Update Resident]
-                    H --> I[Update Case Status]
-                    E --> H
-                """
-
-                
-                if workflow.get("mermaid_diagram"):
-                    
-                    safe_diagram = clean_mermaid(workflow["mermaid_diagram"])
-                    render_mermaid(safe_diagram)
-
-
-
-
-                # -----------------------------
-                # Visual workflow overview
-                # -----------------------------
-
-
-                st.info(
-                    "This guidance is advisory only. "
-                    "Final decisions remain with the officer in charge."
-                )
-         
-        # ------------------------------------------------------------
-        # Officer decision logging (Governance)
-        # ------------------------------------------------------------
-        if workflow:
-            st.divider()
-            st.subheader("Officer Decision")
-
-            decision = st.radio(
-                "How do you want to proceed?",
-                ["Accept guidance", "Modify guidance", "Reject guidance"],
+    if filters.get("q"):
+        q = f"%{filters['q']}%"
+        sql += """
+            AND (
+                ref_id LIKE ?
+                OR description LIKE ?
+                OR location_text LIKE ?
+                OR location_block LIKE ?
+                OR location_street LIKE ?
             )
+        """
+        params.extend([q, q, q, q, q])
 
-            notes = st.text_area(
-                "Officer notes (optional)",
-                placeholder="E.g. Contractor already dispatched earlier.",
-            )
+    sql += " ORDER BY created_at DESC"
 
-            if st.button("Record workflow decision"):
-                log_workflow_decision(
-                    ref_id=ref_id,
-                    workflow=workflow,
-                    officer_decision=decision,
-                    officer_notes=notes.strip() or None,
-                )
-                st.success("Officer decision recorded.")
+    rows = cur.execute(sql, params).fetchall()
+    conn.close()
 
-        # ------------------------------------------------------------
-        # Status update
-        # ------------------------------------------------------------
-        st.divider()
-        new_status = st.selectbox("Update status", ["New", "In Progress", "Resolved", "Closed"], index=["New", "In Progress", "Resolved", "Closed"].index(case["status"] or "New"))
-        if st.button("Save status"):
-            update_status(ref_id, new_status)
-            st.success("Status updated. Click Refresh to reload list.")
+    return [dict(r) for r in rows]
 
 
 # ------------------------------------------------------------
-# Export
+# Get single submission by reference ID
 # ------------------------------------------------------------
-st.divider()
-if st.button("Export current list to CSV"):
-    import pandas as pd
-    if rows:
-        df = pd.DataFrame(rows)
-        st.download_button("Download CSV", data=df.to_csv(index=False).encode("utf-8"), file_name=f"cases_{datetime.now().strftime('%Y%m%d_%H%M')}.csv", mime="text/csv")
-    else:
-        st.info("Nothing to export for the current filters.")
+def get_submission_by_ref(ref_id: str) -> Optional[Dict]:
+    conn = _get_conn()
+    cur = conn.cursor()
+
+    row = cur.execute(
+        "SELECT * FROM submissions WHERE ref_id = ?",
+        (ref_id,),
+    ).fetchone()
+
+    conn.close()
+    return dict(row) if row else None
+
+
+# ------------------------------------------------------------
+# Get attachments for a case
+# ------------------------------------------------------------
+def get_attachments(ref_id: str) -> List[Dict]:
+    conn = _get_conn()
+    cur = conn.cursor()
+
+    rows = cur.execute(
+        "SELECT * FROM attachments WHERE ref_id = ? ORDER BY created_at",
+        (ref_id,),
+    ).fetchall()
+
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+# ------------------------------------------------------------
+# Update case status
+# ------------------------------------------------------------
+def update_status(ref_id: str, new_status: str):
+    conn = _get_conn()
+    cur = conn.cursor()
+
+    cur.execute("""
+        UPDATE submissions
+        SET status = ?
+        WHERE ref_id = ?
+    """, (new_status, ref_id))
+
+    conn.commit()
+    conn.close()
+
+
+# ------------------------------------------------------------
+# Log officer workflow decision (AI governance)
+# ------------------------------------------------------------
+def log_workflow_decision(
+    ref_id: str,
+    workflow: Dict,
+    officer_decision: str,
+    officer_notes: Optional[str],
+):
+    conn = _get_conn()
+    cur = conn.cursor()
+
+    cur.execute("""
+        INSERT INTO workflow_decisions (
+            ref_id,
+            ai_used,
+            priority_level,
+            recommended_status,
+            actions_json,
+            officer_decision,
+            officer_notes,
+            created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
+    """, (
+        ref_id,
+        1 if workflow.get("notes", "").lower().startswith("ai") else 0,
+        workflow.get("priority_level"),
+        workflow.get("recommended_status"),
+        str(workflow.get("actions")),
+        officer_decision,
+        officer_notes,
+    ))
+
+    conn.commit()
+    conn.close()
