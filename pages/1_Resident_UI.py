@@ -25,6 +25,99 @@ from dotenv import load_dotenv
 # DB layer (must be in same folder)
 from db import init_db, insert_submission, insert_attachment
 
+
+# -----------------------------------------------------------
+# Emergency category definitions
+# -----------------------------------------------------------
+EMERGENCY_CATEGORIES = {
+    "Fire Hazard",
+    "Flooding",
+    "Electrical Hazard",
+    "Gas Leak",
+    "Structural Collapse"
+}
+
+
+# -----------------------------------------------------------
+# Safety / resident advice by category (blue box content)
+# -----------------------------------------------------------
+
+CATEGORY_ADVICE = {
+    # Cleanliness issues
+    "Overflowing Rubbish Bins": (
+        "This bin point is currently full. Residents are advised not to leave "
+        "additional rubbish here. Please use the nearest available alternative "
+        "bin point and ensure rubbish is securely tied."
+    ),
+
+    "Uncollected Rubbish": (
+        "Rubbish at this location has not yet been cleared. Residents are advised "
+        "not to place additional bags at this bin point while awaiting collection."
+    ),
+
+    "Rubbish Spillage": (
+        "Spillage has been reported at this location. Residents are advised to avoid "
+        "the affected area where possible and not to dispose additional rubbish here "
+        "until cleaning is completed."
+    ),
+
+    "Illegal Dumping": (
+        "Discarded items have been reported at this location. Residents are advised "
+        "not to move or handle the items and to keep the area clear for authorised removal."
+    ),
+
+    "Bulky Waste": (
+        "Bulky items have been left at this location. Residents are advised not to "
+        "attempt to move the items on their own and to keep walkways clear until removal."
+    ),
+
+    # Pest-related issues
+    "Pest Infestation": (
+        "Pest activity has been reported in this area. Residents are advised to ensure "
+        "food waste is properly sealed and to avoid leaving loose rubbish around bin points."
+    ),
+
+    "Rat Infestation": (
+        "Rats have been sighted in this area. Residents are advised not to approach or "
+        "feed the rats and to ensure rubbish bins are kept closed and food waste is sealed."
+    ),
+
+    # Disturbance / behaviour issues
+    "Noise Disturbance": (
+        "Noise disturbance has been reported. Residents may wish to keep a record of "
+        "dates and times of occurrence and avoid direct confrontation where possible."
+    ),
+
+    "Youth Disturbance": (
+        "Disturbances involving groups have been reported. Residents are advised to "
+        "avoid direct confrontation and to look out for one another, especially at night."
+    ),
+
+    # Maintenance issues
+    "Water Leakage": (
+        "Water leakage has been reported at this location. Residents are advised to "
+        "avoid the wet area to prevent slips and to monitor the situation for any changes."
+    ),
+
+    "Choked Drain": (
+        "A choked drain has been reported. Residents are advised not to dispose waste or "
+        "pour liquids into the drain until clearing works are completed."
+    ),
+
+    # General fallback for non-critical estate issues
+    "General Estate Issue": (
+        "Town Council has been notified of this issue. Residents are advised to allow "
+        "time for assessment and follow-up."
+    )
+}
+
+# Default advice (shown if category not found above)
+DEFAULT_ADVICE = (
+    "Town Council has been notified of this issue. "
+    "Please allow some time for assessment and follow-up."
+)
+
+
 # ---------------------------------------------------------------
 # Basic setup
 # ---------------------------------------------------------------
@@ -528,28 +621,64 @@ if submit:
     st.markdown(f"**Reference ID:** `{ref_id}`")
     st.write("An officer will be in touch with you regarding your feedback.")
 
+    # -----------------------------------------------------------
+    # Optional: Show detected category
+    # -----------------------------------------------------------
     if SHOW_CATEGORY_TO_RESIDENT and final_category:
         st.markdown(
             f"**Detected category:** **{final_category}** "
             f"(confidence: {final_conf})"
         )
 
+    # -----------------------------------------------------------
+    # Suggested agency
+    # -----------------------------------------------------------
     if agency_info:
         st.markdown(f"**Suggested agency:** {agency_info['agency']}")
         if agency_info.get("notes"):
             st.caption(agency_info["notes"])
 
     st.divider()
+
+    # -----------------------------------------------------------
+    # Town Council actions
+    # -----------------------------------------------------------
     st.subheader("What happens next (Town Council actions)")
     for s in steps:
         st.markdown(f"- {s}")
 
+    # -----------------------------------------------------------
+    # Resident tips
+    # -----------------------------------------------------------
     st.subheader("What you can do now (optional)")
     for t in tips:
         st.markdown(f"- {t}")
 
-    st.info(
-        "If anyone is in immediate danger (e.g., fire, flooding, electrocution risk),"
-        " keep a safe distance and contact emergency services."
-    )
+
+    # --- Normalize final category ---
+    if final_category:
+        final_category = final_category.strip()
+
+    # -----------------------------------------------------------
+    # SAFETY / RESIDENT ADVICE (ALWAYS SHOWN)
+    # -----------------------------------------------------------
+
+    # Emergency advice ONLY if category is explicitly an emergency
+    if final_category in EMERGENCY_CATEGORIES:
+        # Emergency cases → red box
+        st.error(
+            "If anyone is in immediate danger, keep a safe distance and "
+            "contact emergency services immediately."
+        )
+    else:
+        # Non-emergency cases → blue box (issue-specific)
+        advice_text = CATEGORY_ADVICE.get(final_category)
+
+        # Safe fallback (should rarely trigger)
+        if not advice_text:
+            advice_text = DEFAULT_ADVICE
+
+        st.info(advice_text)
+
+
 
