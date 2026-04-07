@@ -21,9 +21,21 @@ from typing import Optional, Dict, List, Tuple
 
 import streamlit as st
 from dotenv import load_dotenv
+load_dotenv()
 
 # DB layer (must be in same folder)
 from db import init_db, insert_submission, insert_attachment
+
+
+
+# -----------------------------------------------------------
+# Email utilities
+# -----------------------------------------------------------
+from email_utils import (
+    generate_acknowledgement_email,
+    send_email,
+    INTERIM_ADVICE_MAP
+)
 
 
 # -----------------------------------------------------------
@@ -620,6 +632,31 @@ if submit:
     st.success("Thank you — your feedback has been received.")
     st.markdown(f"**Reference ID:** `{ref_id}`")
     st.write("An officer will be in touch with you regarding your feedback.")
+
+    # -----------------------------------------------------------
+    # Send acknowledgement email to resident (if email provided)
+    # -----------------------------------------------------------
+    resident_name = name.strip() or None
+    resident_email = contact.strip() if contact and "@" in contact else None
+
+    interim_advice = INTERIM_ADVICE_MAP.get(
+        final_category,
+        INTERIM_ADVICE_MAP["General"]
+    )
+
+    subject, body = generate_acknowledgement_email(
+        resident_name=resident_name,
+        issue_category=final_category,
+        interim_advice=interim_advice
+    )
+
+    if resident_email:
+        sent, error = send_email(resident_email, subject, body)
+      
+        if sent:
+            st.caption("📧 A confirmation email has been sent to you.")
+        else:
+            st.warning(f"⚠️ Email could not be sent: {error}")
 
     # -----------------------------------------------------------
     # Optional: Show detected category
