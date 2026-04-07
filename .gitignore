@@ -10,3 +10,5 @@ uploads/
 classifier.py
 test_key.py
 user_interface.py
+.streamlit/secrets.toml
+.env
