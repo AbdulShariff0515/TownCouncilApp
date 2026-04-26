@@ -449,3 +449,31 @@ def get_case_actions(ref_id: str) -> List[Dict]:
         })
 
     return actions
+
+# ------------------------------------------------------------
+# Phase 2 adapter: Save officer action + notify resident
+# ------------------------------------------------------------
+
+def save_case_action_and_notify(
+    case_id: str,
+    action_type: str,
+    action_notes: str,
+    new_status: str,
+):
+    # 1. Save action and update status (existing behaviour)
+    save_case_action(
+        case_id=case_id,
+        action_type=action_type,
+        action_notes=action_notes,
+        new_status=new_status,
+    )
+
+    # 2. Notify resident (import here to avoid circular import)
+    from notifications import notify_resident_of_action
+
+    notify_resident_of_action(
+        case_id=case_id,
+        action_type=action_type,
+        action_notes=action_notes,
+        new_status=new_status,
+    )
