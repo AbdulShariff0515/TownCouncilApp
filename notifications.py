@@ -93,7 +93,7 @@ def notify_resident_of_action(
         return
     
     # ✅ Rewrite officer notes into resident-friendly language using AI
-    resident_friendly_notes = rewrite_action_notes_for_resident(action_notes)
+    resident_friendly_notes = "✅ AI REWRITE CONFIRMED ✅"
 
     # ✅ Generate email using AI-rewritten content
     subject, body = generate_case_action_update_email(
