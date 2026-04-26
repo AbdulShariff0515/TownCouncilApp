@@ -28,15 +28,16 @@ def rewrite_action_notes_for_resident(action_notes: str) -> str:
         client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
         prompt = (
-            "You must write a NEW email update to a resident.\n\n"
-            "Rules (MANDATORY):\n"
-            "- Do NOT reuse any sentences or phrasing from the input\n"
-            "- Do NOT sound like internal notes or a memo\n"
-            "- Write as a Town Council officer addressing a resident\n"
-            "- Use clear, reassuring, non-technical language\n"
-            "- 2 short paragraphs maximum\n\n"
-            "Internal officer notes (FOR CONTEXT ONLY, DO NOT COPY):\n"
+            
+            "You are a Town Council officer writing an email update to a resident.\n\n"
+            "Rules:\n"
+            "- Do NOT copy or reuse the officer's wording\n"
+            "- Write in clear, polite, reassuring language\n"
+            "- Maximum 2 short paragraphs\n"
+            "- Do not include internal or technical details\n\n"
+            "Internal officer notes for context only:\n"
             f"{action_notes}"
+
         )
 
 
@@ -47,17 +48,20 @@ def rewrite_action_notes_for_resident(action_notes: str) -> str:
         )
 
         rewritten = response.choices[0].message.content.strip()
-        return rewritten or action_notes
-        
-        if rewritten.strip().lower() == action_notes.strip().lower():
+
+        # ✅ Safety check
+        if not rewritten or rewritten.lower() == action_notes.lower():
             return (
-                "We would like to provide you with an update regarding your case. "
-                "If you have any feedback or additional information to share, "
-                "please let us know."
+                "We would like to provide you with an update on your feedback. "
+                "Our team has taken the necessary action, and we will continue "
+                "to monitor the situation. Thank you for your patience."
             )
 
+        return rewritten
+
+
     except Exception:
-        # ✅ Never block sending email
+        # ✅ ✅ Always fail gracefully
         return action_notes
 
 # ------------------------------------------------------------
@@ -85,13 +89,19 @@ def notify_resident_of_action(
     resident_email = case.get("contact")
     if not resident_email:
         return
+    
+    # ✅ Rewrite officer notes into resident-friendly language using AI
+    resident_friendly_notes = rewrite_action_notes_for_resident(action_notes)
 
+    # ✅ Generate email using AI-rewritten content
     subject, body = generate_case_action_update_email(
         resident_name=case.get("name"),
         ref_id=case_id,
         action_type=action_type,
-        action_notes=action_notes,
+        action_notes=resident_friendly_notes,
         new_status=new_status,
+
+
     )
 
     send_email(resident_email, subject, body)
