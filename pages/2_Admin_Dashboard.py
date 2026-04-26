@@ -28,12 +28,13 @@ from db import (
     log_workflow_decision,
     list_progress_entries,
     create_progress_entry,
+    save_case_action_and_notify as save_case_action,
 
     # ✅ Phase 1 adapters
     get_case_by_reference_id,
     get_officer_notes,
     save_officer_notes,
-    save_case_action,
+    save_case_action_and_notify as save_case_action,
     get_case_actions,
 )
 
@@ -428,6 +429,7 @@ if case:
             new_status=new_status
         )
         st.success("✅ Officer action recorded")
+        st.rerun()
 
     st.divider()
 
@@ -446,6 +448,13 @@ if case:
             timeline=timeline,
             current_status=case.get("status")
         )
+
+
+    # ------------------------------------------------------------
+    # Case Progress (Original Timeline)
+    # ------------------------------------------------------------
+    st.divider()
+    render_case_progress(case["ref_id"])
 
 
 # ── Mermaid helpers ───────────────────────────────
@@ -477,37 +486,6 @@ def render_mermaid(code: str):
     )
  
  
-
-# ------------------------------------------------------------
-# Render case progress timeline (Phase 1B – read-only)
-# ------------------------------------------------------------
-def render_case_progress(ref_id: str):
-    st.subheader("Case Progress")
-
-    entries = list_progress_entries(ref_id)
-
-    if not entries:
-        st.caption("No progress updates recorded yet.")
-        return
-
-    for entry in entries:
-        col_icon, col_body = st.columns([1, 10])
-
-        with col_icon:
-            st.markdown("✅")
-
-        with col_body:
-            st.markdown(f"**{entry['step_label']}**")
-            st.caption(entry["created_at"])
-
-            if entry.get("notes"):
-                st.markdown(
-                    f"<span style='color:#6c757d'>{entry['notes']}</span>",
-                    unsafe_allow_html=True
-                )
-
-        st.divider()
-
 # ------------------------------------------------------------
 # Filters
 # ------------------------------------------------------------
@@ -694,33 +672,27 @@ if ref_id:
                 st.rerun()
 
         # ------------------------------------------------------------
-        # Case progress timeline (Phase 1B)
-        # ------------------------------------------------------------
-        st.divider()
-        render_case_progress(ref_id)
-
-
-        # ------------------------------------------------------------
         # Status update
         # ------------------------------------------------------------
         st.divider()
-        
-        if st.button("Save status"):
-            old_status = case["status"] or "New"
 
-            if new_status != old_status:
-                update_status(ref_id, new_status)
+        old_status = case["status"] or "New"
+        new_status = st.session_state.get("case_status_select", old_status)
 
-                create_progress_entry(
-                    ref_id=ref_id,
-                    step_code="STATUS_UPDATED",
-                    step_label=f"Status updated to {new_status}",
-                    notes=f"Previous status: {old_status}"
-                )
+        if new_status != old_status:
+            update_status(ref_id, new_status)
 
-                st.success("Status updated and progress recorded.")
-            else:
-                st.info("Status unchanged. No update recorded.")
+            create_progress_entry(
+                ref_id=ref_id,
+                step_code="STATUS_UPDATED",
+                step_label=f"Status updated to {new_status}",
+                notes=f"Previous status: {old_status}"
+            )
+
+            st.success("Status updated and progress recorded.")
+        else:
+            st.info("Status unchanged. No update recorded.")
+
 
 # ------------------------------------------------------------
 # Export
