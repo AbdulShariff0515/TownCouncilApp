@@ -28,7 +28,6 @@ from db import (
     log_workflow_decision,
     list_progress_entries,
     create_progress_entry,
-    save_case_action_and_notify as save_case_action,
 
     # ✅ Phase 1 adapters
     get_case_by_reference_id,
@@ -36,6 +35,9 @@ from db import (
     save_officer_notes,
     save_case_action_and_notify as save_case_action,
     get_case_actions,
+    
+    # ✅ Phase 2
+    save_case_action_and_notify as save_case_action,
 )
 
 # ── Streamlit page config (MUST be after st import) ─
