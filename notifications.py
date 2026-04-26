@@ -22,6 +22,8 @@ def rewrite_action_notes_for_resident(action_notes: str) -> str:
         return action_notes
     
     try:
+        print("AI EMAIL REWRITE ATTEMPTED")  # ✅ WRITE THIS LINE HERE
+        
         import os
         from openai import OpenAI
 
