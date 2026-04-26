@@ -118,3 +118,42 @@ INTERIM_ADVICE_MAP = {
         "Allow access for inspection where safe to do so"
     ]
 }
+
+# ─────────────────────────────────────────────
+# Case action update email (Officer → Resident)
+# ─────────────────────────────────────────────
+
+def generate_case_action_update_email(
+    resident_name: str,
+    ref_id: str,
+    action_type: str,
+    action_notes: str,
+    new_status: str,
+):
+    subject = f"Update on Your Town Council Case ({ref_id})"
+
+    body = f"""
+Dear {resident_name or 'Resident'},
+
+We would like to provide you with an update regarding the matter you reported to the Town Council.
+
+✅ Action taken:
+{action_type}
+
+📝 Outcome / Details:
+{action_notes}
+
+📌 Current case status:
+{new_status}
+
+Our officers will continue to monitor the situation and will take further action if required.
+If additional information is needed, our team may contact you.
+
+Thank you for your patience and cooperation.
+
+Yours sincerely,
+Town Council
+Estate Management Team
+""".strip()
+
+    return subject, body
