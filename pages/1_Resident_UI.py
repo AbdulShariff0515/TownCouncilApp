@@ -1,3 +1,4 @@
+
 # -*- coding: utf-8 -*-
 """
 Resident Feedback Portal (Town Council) — Single-entry form
@@ -22,6 +23,7 @@ from typing import Optional, Dict, List, Tuple
 import streamlit as st
 from dotenv import load_dotenv
 load_dotenv()
+
 
 # DB layer (must be in same folder)
 from db import init_db, insert_submission, insert_attachment
@@ -566,6 +568,7 @@ uploads = st.file_uploader(
 submit = st.button("Submit", type="primary", use_container_width=True)
 
 
+
 # ---------------------------------------------------------------
 # After submit
 # ---------------------------------------------------------------
@@ -574,17 +577,17 @@ if submit:
         st.warning("Please describe the issue so we can assist.")
         st.stop()
 
-    # Hybrid classification
+    # ✅ 1. Classification
     final_category, final_conf, source = choose_final_classification(description)
     agency_info = AGENCY_MAP.get(final_category)
 
-    # Generate reference ID
+    # ✅ 2. Reference ID
     ref_id = (
         f"TC-{datetime.now().strftime('%Y%m%d-%H%M%S')}-"
         f"{str(uuid.uuid4())[:8].upper()}"
     )
 
-    # Record for DB
+    # ✅ 3. Save to DB
     record = {
         "ref_id": ref_id,
         "name": name.strip() or None,
@@ -604,7 +607,7 @@ if submit:
 
     insert_submission(record)
 
-    # Save uploads
+    # ✅ 4. Save uploads
     os.makedirs(os.path.join("data", "uploads"), exist_ok=True)
     for up in uploads or []:
         safe_filename = f"{ref_id}_{re.sub(r'[^A-Za-z0-9_.-]+', '-', up.name)}"
@@ -621,10 +624,6 @@ if submit:
             created_at=datetime.now().isoformat(timespec="seconds"),
         )
 
-    # Generate advice
-    steps = council_next_steps(final_category)
-    ai_tips = ai_interim_advice(description, final_category)
-    tips = ai_tips or local_interim_advice(final_category)
 
     # -----------------------------------------------------------
     # Output to user
@@ -632,6 +631,13 @@ if submit:
     st.success("Thank you — your feedback has been received.")
     st.markdown(f"**Reference ID:** `{ref_id}`")
     st.write("An officer will be in touch with you regarding your feedback.")
+
+    steps = council_next_steps(final_category)
+
+
+    # ✅ Define tips BEFORE using them
+    ai_tips = ai_interim_advice(description, final_category)
+    tips = ai_tips or local_interim_advice(final_category)
 
     # -----------------------------------------------------------
     # Send acknowledgement email to resident (if email provided)
@@ -650,9 +656,10 @@ if submit:
         interim_advice=interim_advice
     )
 
+    
     if resident_email:
         sent, error = send_email(resident_email, subject, body)
-      
+
         if sent:
             st.caption("📧 A confirmation email has been sent to you.")
         else:
@@ -716,6 +723,9 @@ if submit:
             advice_text = DEFAULT_ADVICE
 
         st.info(advice_text)
+
+
+
 
 
 
