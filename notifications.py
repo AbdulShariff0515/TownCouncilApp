@@ -22,8 +22,6 @@ def rewrite_action_notes_for_resident(action_notes: str) -> str:
         return action_notes
     
     try:
-        print("AI EMAIL REWRITE ATTEMPTED")  # ✅ WRITE THIS LINE HERE
-        
         import os
         from openai import OpenAI
 
@@ -92,8 +90,8 @@ def notify_resident_of_action(
     if not resident_email:
         return
     
-    # ✅ Rewrite officer notes into resident-friendly language using AI
-    resident_friendly_notes = "✅ AI REWRITE CONFIRMED ✅"
+    # ✅ AI rewrites internal notes into resident-friendly language
+    resident_friendly_notes = rewrite_action_notes_for_resident(action_notes)
 
     # ✅ Generate email using AI-rewritten content
     subject, body = generate_case_action_update_email(
